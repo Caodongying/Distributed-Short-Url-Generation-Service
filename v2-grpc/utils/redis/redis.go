@@ -16,35 +16,36 @@ type RedisUtils struct {
 	// mu sync.Mutex
 }
 
-func (re *RedisUtils) GetRedisClient() *redis.Client{
-	// re.mu.Lock()
-	// defer re.mu.Unlock()
+func (ru *RedisUtils) GetRedisClient() *redis.Client{
+	// ru.mu.Lock()
+	// defer ru.mu.Unlock()
 
 	// 使用单例模式进行初始化
 	// TODO: 是否应该用sync.Once?
-	if re.client != nil {
-		return re.client
+	if ru.client != nil {
+		return ru.client
 	}
 
-	re.client = redis.NewClient(&redis.Options{
-		Addr: re.ServerAddr,
+	ru.client = redis.NewClient(&redis.Options{
+		Addr: ru.ServerAddr,
 		Password: "", //暂时还没有设置密码
 		DB: 0, //使用默认DB
-	})
+		PoolSize: 15,
+	}) // 这里的client是连接池，默认大小是10个连接，我改成了15
 
 	// 检查是否连接成功
-	if pong, err := re.client.Ping(context.Background()).Result(); err != nil {
+	if pong, err := ru.client.Ping(context.Background()).Result(); err != nil {
 		log.Fatalf("无法连接到Redis: %v", err)
 	} else {
 		log.Println("已经连接到Redis: ", pong)
 	}
 
-	return re.client
+	return ru.client
 }
 
 // 👇🏻 获取key对应的值
-func (re *RedisUtils) GetKey(ctx context.Context, key string) (value any, exists bool) {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) GetKey(ctx context.Context, key string) (value any, exists bool) {
+	client := ru.GetRedisClient()
 	result, err := client.Get(ctx, key).Result()
 	if err == redis.Nil {
 		log.Printf("Redis里不存在键: %v", key)
@@ -60,8 +61,8 @@ func (re *RedisUtils) GetKey(ctx context.Context, key string) (value any, exists
 }
 
 // 👇🏻 将某个键值对加入Redis(值为string)，并设置过期时间
-func (re *RedisUtils) AddKeyEx(ctx context.Context, key string, value string, duration float64) error {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) AddKeyEx(ctx context.Context, key string, value string, duration float64) error {
+	client := ru.GetRedisClient()
 	// 为了防止缓存雪崩，生成一个1-3之间的随机数
 	var randExtraTime float64 = 0
 	if duration != 0 {
@@ -76,13 +77,13 @@ func (re *RedisUtils) AddKeyEx(ctx context.Context, key string, value string, du
 }
 
 // 👇🏻 将某个键值对加入Redis(值为string)，无过期时间
-func (re *RedisUtils) AddKey(ctx context.Context,key string, value string) error {
-	return re.AddKeyEx(ctx, key, value, 0)
+func (ru *RedisUtils) AddKey(ctx context.Context,key string, value string) error {
+	return ru.AddKeyEx(ctx, key, value, 0)
 }
 
 // 👇🏻 删除某个键
-func (re *RedisUtils) DeleteKey(ctx context.Context, key string) error {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) DeleteKey(ctx context.Context, key string) error {
+	client := ru.GetRedisClient()
 	_, err := client.Del(ctx, key).Result()
 	if err != nil {
 		log.Printf("无法删除Redis中的键: %v", err)
@@ -92,8 +93,8 @@ func (re *RedisUtils) DeleteKey(ctx context.Context, key string) error {
 }
 
 // 👇🏻 判断某个键是否已经过期
-func (re *RedisUtils) IsExpired(ctx context.Context, key string) bool {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) IsExpired(ctx context.Context, key string) bool {
+	client := ru.GetRedisClient()
 	ttl, err := client.TTL(ctx, key).Result()
 	if err != nil {
 		log.Printf("无法判断键%v是否已经过期", err)
@@ -103,8 +104,8 @@ func (re *RedisUtils) IsExpired(ctx context.Context, key string) bool {
 }
 
 // 👇🏻 检查某个值是否存在于指定布隆过滤器
-func (re *RedisUtils) BFExists(ctx context.Context, filterName string, item string) bool {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) BFExists(ctx context.Context, filterName string, item string) bool {
+	client := ru.GetRedisClient()
 	exists, err := client.BFExists(
 		ctx,
 		filterName,
@@ -117,8 +118,8 @@ func (re *RedisUtils) BFExists(ctx context.Context, filterName string, item stri
 }
 
 // 👇🏻 将某个值加入指定的布隆过滤器
-func (re *RedisUtils) BFAdd(ctx context.Context, filterName string, item string) bool {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) BFAdd(ctx context.Context, filterName string, item string) bool {
+	client := ru.GetRedisClient()
 	result, err := client.BFAdd(ctx, filterName, item).Result()
 	if err != nil {
 		log.Printf("无法创建向布隆过滤器%v中添加%v", filterName, item)
@@ -129,8 +130,8 @@ func (re *RedisUtils) BFAdd(ctx context.Context, filterName string, item string)
 
 
 // 👇🏻 创建布隆过滤器
-func (re *RedisUtils) BFReserve(ctx context.Context, filterName string, errorRate float64, capacity int64) error {
-	client := re.GetRedisClient()
+func (ru *RedisUtils) BFReserve(ctx context.Context, filterName string, errorRate float64, capacity int64) error {
+	client := ru.GetRedisClient()
 	_, err := client.BFReserve(
 		ctx,
 		filterName,

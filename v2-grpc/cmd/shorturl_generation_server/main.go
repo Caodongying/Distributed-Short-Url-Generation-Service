@@ -40,6 +40,7 @@ var (
 	tableIDs []string = []string{"j", "k"} // 两个表
 )
 
+// 静态配置
 type ServerConfig struct {
 	DB *gorm.DB
 	HashringDB *ch.HashRing
@@ -48,9 +49,10 @@ type ServerConfig struct {
 	// WorkerNodeID int64
 }
 
+// 动态创建
 type generationServer struct { // 这里可以都用小写
 	pb_gen.UnimplementedShortURLGenerationServiceServer // 嵌入，不是字段！不可以是server pb....
-	redisClient *redis.Client // 共享同一个redis客户端实例
+	redisUtils *redisutil.RedisUtils // 共享同一个redisUtil实例
 	cfg ServerConfig
 	// idWorker *idgenerator.Worker
 }
@@ -66,13 +68,12 @@ func NewGenerationServer(cfg ServerConfig) *generationServer {
 	} else{
 		redisAddr = cfg.RedisAddr
 	}
-	redisUtils := redisutil.RedisUtils{ServerAddr: redisAddr}
-	redisClient := redisUtils.GetRedisClient()
+	redisUtils := &redisutil.RedisUtils{ServerAddr: redisAddr}
 
 	// 创建服务器实例
 	server := &generationServer {
 		cfg: cfg,
-		redisClient: redisClient,
+		redisUtils: redisUtils,
 	}
 
 	return server
@@ -85,17 +86,16 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 	var err error = nil
 
 	// ------ 检查Redis是否已经存在生成的短链 ------
-	redisUtils := redisutil.RedisUtils{ServerAddr: defaultRedisAddr}
 	key := originalUrlKeyPrefix + originalUrl
-	if result, exists := redisUtils.GetKey(ctx, key); exists {
+	if result, exists := gs.redisUtils.GetKey(ctx, key); exists {
 		// ------- Redis里已经存有当前长链的信息 -------
 		// 检查短链是否过期
-		if isExpired := redisUtils.IsExpired(ctx, key); isExpired {
+		if isExpired := gs.redisUtils.IsExpired(ctx, key); isExpired {
 			// 短链已经过期，则查询数据库
 			// 删除Redis中已经过期的短链
 			shortUrlKey := shortUrlKeyPrefix + result.(string)
-			redisUtils.DeleteKey(ctx, shortUrlKey)
-			shortUrl = gs.getShortUrlFromDB(ctx, originalUrl, &redisUtils)
+			gs.redisUtils.DeleteKey(ctx, shortUrlKey)
+			shortUrl = gs.getShortUrlFromDB(ctx, originalUrl)
 		} else {
 			shortUrl = result.(string) // 类型断言，将any类型的result转换为string
 		}
@@ -103,9 +103,9 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 		// ------- Redis里不存在当前长链的键 -------
 		log.Println("Redis里不存在", key, "查询布隆过滤器......")
 		// 检查布隆过滤器
-		if exists = redisUtils.BFExists(ctx, bloomFilterName, originalUrl); exists {
+		if exists = gs.redisUtils.BFExists(ctx, bloomFilterName, originalUrl); exists {
 			// 布隆过滤器里存在当前长链，访问数据库
-			shortUrl = gs.getShortUrlFromDB(ctx, originalUrl, &redisUtils)
+			shortUrl = gs.getShortUrlFromDB(ctx, originalUrl)
 		} else {
 			// 布隆过滤器里不存在当前长链，则数据库中也必然不存在长链信息
 			// 生成短链并返回
@@ -118,7 +118,7 @@ func (gs *generationServer) GenerateShortURL(ctx context.Context, req *pb_gen.Ge
 }
 
 // 👇🏻 访问MySQL，看长链是否存在+是否已经过期
-func (gs *generationServer) getShortUrlFromDB(ctx context.Context, originalUrl string, redisUtils *redisutil.RedisUtils) (shortUrl string) {
+func (gs *generationServer) getShortUrlFromDB(ctx context.Context, originalUrl string) (shortUrl string) {
 	var mapping model.URLMapping
 	dbError := gs.cfg.DB.Where("original_url = ?", originalUrl).First(&mapping).Error
 	if errors.Is(dbError, gorm.ErrRecordNotFound){
@@ -137,8 +137,8 @@ func (gs *generationServer) getShortUrlFromDB(ctx context.Context, originalUrl s
 		} else {
 			// 数据库中的短链没有过期
 			// 更新Redis，添加当前长短链对应关系，设置数据库中写定的过期时间
-			redisUtils.AddKeyEx(ctx, originalUrlKeyPrefix + originalUrl, shortUrl, time.Until(mapping.ExpireAt).Hours())
-			redisUtils.AddKeyEx(ctx, shortUrlKeyPrefix + shortUrl, originalUrl, time.Until(mapping.ExpireAt).Hours())
+			gs.redisUtils.AddKeyEx(ctx, originalUrlKeyPrefix + originalUrl, shortUrl, time.Until(mapping.ExpireAt).Hours())
+			gs.redisUtils.AddKeyEx(ctx, shortUrlKeyPrefix + shortUrl, originalUrl, time.Until(mapping.ExpireAt).Hours())
 			shortUrl = mapping.ShortUrl
 		}
 	}
@@ -147,8 +147,7 @@ func (gs *generationServer) getShortUrlFromDB(ctx context.Context, originalUrl s
 
 // 👇🏻 真正的开始生成短链的逻辑
 func (gs *generationServer) createShortURL(ctx context.Context, originalUrl string) (shortUrl string) {
-	redisUtils := redisutil.RedisUtils{ServerAddr: "localhost:6379"}
-	redisClient := gs.redisClient
+	redisClient := gs.redisUtils.GetRedisClient()
 	// 获取分布式锁
 	keyLock := distributedLockPrefix + originalUrl
 	valueLock := "" // uuid
@@ -189,10 +188,10 @@ func (gs *generationServer) createShortURL(ctx context.Context, originalUrl stri
 			// 插入成功
 			log.Printf("插入长短链映射关系成功，长链: %v, 短链: %v", originalUrl, shortUrl)
 			// 将当前长短链对应关系写入布隆过滤器和Redis
-			redisUtils.BFAdd(ctx, bloomFilterName, originalUrl)
+			gs.redisUtils.BFAdd(ctx, bloomFilterName, originalUrl)
 			// 设置短链在Redis中的过期时间
-			redisUtils.AddKeyEx(ctx, originalUrlKeyPrefix +originalUrl, shortUrl, redisShortUrlExpireHours)
-			redisUtils.AddKeyEx(ctx, shortUrlKeyPrefix+shortUrl, originalUrl, redisShortUrlExpireHours)
+			gs.redisUtils.AddKeyEx(ctx, originalUrlKeyPrefix +originalUrl, shortUrl, redisShortUrlExpireHours)
+			gs.redisUtils.AddKeyEx(ctx, shortUrlKeyPrefix+shortUrl, originalUrl, redisShortUrlExpireHours)
 		}
 	} else {
 		// 当前goroutine没有获取到分布式锁
@@ -339,3 +338,10 @@ func main() {
 	}
 
 }
+
+// gRPC 服务器的工作方式：
+// 1. main() 执行一次，启动服务
+// 2. 对于每个传入的请求，gRPC 会：
+//    - 创建新的 goroutine 处理请求 ✅
+//    - 调用对应的 handler 方法 ✅
+//    - 所有 handler 共享同一个 server 实例 ✅
